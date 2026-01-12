@@ -136,8 +136,6 @@ For geometrically-correct perspective rendering, the current parallax-based appr
 
 See `HEAD_COUPLED_PERSPECTIVE.md` for detailed implementation notes.
 
-![Example](./public/media/example.gif)
-
 ## Browser Support
 
 This application requires modern browsers that support:
