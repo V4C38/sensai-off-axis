@@ -2,7 +2,7 @@
 
 A real-time face landmark detection application built with React, TypeScript, and MediaPipe. This project serves as both a standalone application and a robust foundation for building more complex face-driven applications. Whether you're looking to implement basic facial tracking or create advanced face-driven experiences, this codebase provides the essential building blocks.
 
-<img src="./public/media/demo.gif" alt="Demo" width="800" />
+<img src="public/media/demo.gif" alt="Demo" width="800" />
 
 ## Features
 
