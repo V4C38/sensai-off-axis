@@ -3,6 +3,9 @@ import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark';
 import { HeadPose } from './headPose';
 import { OffAxisCamera } from './offAxisCamera';
 import { calibrationManager, CalibrationData } from './calibration';
+import { GaussianSplatAnimator } from './gaussianSplatAnimator';
+import { ALL_SPLAT_INDICES, assertValidSplatIndex, SplatIndex } from './sceneConfig';
+import { SPLAT_CROSSFADE_DURATION_SECONDS } from './presentationScript';
 
 export interface ThreeSceneOptions {
   container: HTMLElement;
@@ -10,24 +13,42 @@ export interface ThreeSceneOptions {
   height?: number;
 }
 
+interface CachedSplatEntry {
+  mesh: SplatMesh;
+  animator: GaussianSplatAnimator;
+  initialized: Promise<void>;
+}
+
+const MAX_RENDER_PIXEL_RATIO = 1.25;
+const LOD_SPLAT_COUNT = 1000000;
+const LOD_RENDER_SCALE = 1.0;
+
 export class ThreeSceneManager {
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private renderer: THREE.WebGLRenderer;
   private sparkRenderer: SparkRenderer;
   private offAxisCamera: OffAxisCamera;
-  private model: THREE.Object3D | null = null;
-  private splatMesh: SplatMesh | null = null;
-  private logoGroup: THREE.Group | null = null;
-  private logoPanel: THREE.Mesh | null = null;
-  private splatForwardOffset: number = 0.0;
-  private lodSplatCount: number = 500000;
-  private lodRenderScale: number = 2.0;
+  private activeSplatMesh: SplatMesh | null = null;
+  private outgoingSplatMesh: SplatMesh | null = null;
+  private activeSplatAnimator: GaussianSplatAnimator | null = null;
+  private outgoingSplatAnimator: GaussianSplatAnimator | null = null;
+  private currentSplatIndex: SplatIndex = 1;
+  private splatForwardOffset = 0.0;
+  private modelPosition = new THREE.Vector3(0, -0.02, this.splatForwardOffset);
+  private modelScale = 0.05;
+  private modelRotation = new THREE.Euler(0, 0, 0);
+  private readonly splatCache = new Map<SplatIndex, CachedSplatEntry>();
+  private preloadAllSplatsPromise: Promise<void> | null = null;
+  private loadRequestId = 0;
+  private lodSplatCount = LOD_SPLAT_COUNT;
+  private lodRenderScale = LOD_RENDER_SCALE;
   private renderAspect: number;
   private animationFrameId: number | null = null;
   private isRunning = false;
+  private needsRender = true;
   private currentHeadPose: HeadPose = { x: 0.5, y: 0.5, z: 1 };
-  private debugMode: boolean = false;
+  private debugMode = false;
   private debugHelpers: THREE.Object3D[] = [];
 
   constructor(options: ThreeSceneOptions) {
@@ -35,7 +56,7 @@ export class ThreeSceneManager {
     const height = options.height || options.container.clientHeight;
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x1a1a1a);
+    this.scene.background = new THREE.Color(0xffffff);
 
     this.camera = new THREE.PerspectiveCamera(200, width / height, 0.1, 1000);
     this.camera.position.set(0, 0, -25);
@@ -45,6 +66,7 @@ export class ThreeSceneManager {
     if (!Number.isFinite(this.renderAspect) || this.renderAspect <= 0) {
       throw new Error('Invalid calibration aspect ratio');
     }
+
     calibration.pixelWidth = width;
     calibration.pixelHeight = height;
     calibrationManager.updatePixelDimensions(width, height);
@@ -53,9 +75,11 @@ export class ThreeSceneManager {
 
     this.renderer = new THREE.WebGLRenderer({
       antialias: false,
-      alpha: false
+      alpha: false,
+      powerPreference: 'high-performance',
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setClearColor(0xffffff, 1);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_RENDER_PIXEL_RATIO));
     this.renderer.domElement.style.position = 'absolute';
     this.renderer.domElement.style.left = '50%';
     this.renderer.domElement.style.top = '50%';
@@ -72,313 +96,224 @@ export class ThreeSceneManager {
       lodSplatCount: this.lodSplatCount,
       lodRenderScale: this.lodRenderScale,
       sortRadial: false,
-      behindFoveate: 0.2
+      behindFoveate: 0.2,
     });
     this.scene.add(this.sparkRenderer);
 
-    this.loadSplatModel();
-    this.createLogoPanel();
     this.createDebugHelpers();
+    void this.preloadAllSplats();
   }
 
-  private loadSplatModel(): void {
-    this.splatMesh = new SplatMesh({
-      url: '/media/Whimsical Pink Candy Cafe.ply',
+  async preloadAllSplats(): Promise<void> {
+    if (this.preloadAllSplatsPromise) {
+      return this.preloadAllSplatsPromise;
+    }
+
+    this.preloadAllSplatsPromise = Promise.all(
+      ALL_SPLAT_INDICES.map(async (index) => {
+        const entry = this.getOrCreateSplatEntry(index);
+        await entry.initialized;
+      })
+    ).then(() => {
+      this.needsRender = true;
+    });
+
+    return this.preloadAllSplatsPromise;
+  }
+
+  async prepareSplat(index: SplatIndex): Promise<void> {
+    assertValidSplatIndex(index);
+
+    const entry = this.getOrCreateSplatEntry(index);
+    await entry.initialized;
+
+    this.needsRender = true;
+  }
+
+  async showSplat(index: SplatIndex, crossfade: boolean = true): Promise<void> {
+    assertValidSplatIndex(index);
+
+    if (this.activeSplatMesh && this.currentSplatIndex === index) {
+      if (!crossfade && this.activeSplatAnimator) {
+        this.activeSplatAnimator.setProgress(1);
+      }
+      return;
+    }
+
+    const requestId = ++this.loadRequestId;
+    const entry = this.getOrCreateSplatEntry(index);
+    await entry.initialized;
+
+    if (requestId !== this.loadRequestId) {
+      return;
+    }
+
+    if (this.outgoingSplatMesh === entry.mesh) {
+      this.scene.remove(this.outgoingSplatMesh);
+      this.outgoingSplatAnimator?.stop();
+      this.outgoingSplatMesh = null;
+      this.outgoingSplatAnimator = null;
+    }
+
+    this.applyCurrentTransform(entry.mesh);
+    entry.animator.setProgress(1);
+    this.needsRender = true;
+    await this.promoteSplat(entry.mesh, entry.animator, index, crossfade);
+  }
+
+  private async promoteSplat(
+    nextMesh: SplatMesh,
+    nextAnimator: GaussianSplatAnimator,
+    index: SplatIndex,
+    crossfade: boolean
+  ): Promise<void> {
+    this.disposeOutgoingSplat();
+
+    if (crossfade && this.activeSplatMesh && this.activeSplatAnimator) {
+      this.outgoingSplatMesh = this.activeSplatMesh;
+      this.outgoingSplatAnimator = this.activeSplatAnimator;
+      this.activeSplatMesh = null;
+      this.activeSplatAnimator = null;
+      await this.outgoingSplatAnimator.animateOut(SPLAT_CROSSFADE_DURATION_SECONDS);
+      this.disposeOutgoingSplat();
+    } else if (this.activeSplatMesh) {
+      this.scene.remove(this.activeSplatMesh);
+      this.activeSplatMesh = null;
+      this.activeSplatAnimator = null;
+    }
+
+    this.activeSplatMesh = nextMesh;
+    this.activeSplatAnimator = nextAnimator;
+    this.currentSplatIndex = index;
+
+    this.scene.add(nextMesh);
+    this.activeSplatAnimator.setProgress(1);
+
+    this.needsRender = true;
+  }
+
+  private getSplatUrl(index: SplatIndex): string {
+    return `/media/${index}.ply`;
+  }
+
+  private getOrCreateSplatEntry(index: SplatIndex): CachedSplatEntry {
+    const cachedEntry = this.splatCache.get(index);
+    if (cachedEntry) {
+      return cachedEntry;
+    }
+
+    const mesh = new SplatMesh({
+      url: this.getSplatUrl(index),
       lod: true,
-      lodScale: 1.0
+      lodScale: 1.0,
     });
-    this.splatMesh.position.set(0, -0.02, this.splatForwardOffset);
-    this.splatMesh.scale.setScalar(0.05);
-    this.scene.add(this.splatMesh);
+    this.applyCurrentTransform(mesh);
+
+    const animator = new GaussianSplatAnimator(mesh, {
+      duration: SPLAT_CROSSFADE_DURATION_SECONDS,
+    });
+    animator.apply();
+    animator.setProgress(0);
+
+    const entry: CachedSplatEntry = {
+      mesh,
+      animator,
+      initialized: mesh.initialized.then(() => undefined),
+    };
+    this.splatCache.set(index, entry);
+    return entry;
   }
 
-  private createLogoPanel(): void {
-    this.logoGroup = new THREE.Group();
-    this.logoGroup.position.set(0, 0.03, 0.02);
-    this.logoGroup.scale.setScalar(0.689);
-    this.scene.add(this.logoGroup);
-
-    const wrapperPanel = this.createCardPanel({
-      worldWidth: 0.168,
-      worldHeight: 0.094,
-      backgroundColor: 'rgba(0, 0, 0, 0.28)',
-      borderColor: 'rgba(255, 255, 255, 0.14)',
-      borderRadius: 22,
-    });
-    wrapperPanel.position.set(0, -0.022, -0.001);
-    this.logoGroup.add(wrapperPanel);
-
-    const texture = new THREE.TextureLoader().load('/media/SensAI-logo.png', (tex) => {
-      const aspect = tex.image.width / tex.image.height;
-      const panelHeight = 0.06;
-      const panelWidth = panelHeight * aspect;
-      if (this.logoPanel) {
-        this.logoPanel.geometry.dispose();
-        this.logoPanel.geometry = new THREE.PlaneGeometry(panelWidth, panelHeight);
-      }
-    });
-    texture.colorSpace = THREE.SRGBColorSpace;
-
-    const material = new THREE.MeshBasicMaterial({
-      map: texture,
-      transparent: true,
-      side: THREE.DoubleSide,
-    });
-    const geometry = new THREE.PlaneGeometry(0.12, 0.06);
-    this.logoPanel = new THREE.Mesh(geometry, material);
-    this.logoGroup.add(this.logoPanel);
-
-    const titlePanel = this.createTextPanel({
-      text: 'Worlds in Action',
-      fontSize: 92,
-      fontWeight: 700,
-      textColor: '#ffffff',
-      paddingX: 18,
-      paddingY: 16,
-      worldHeight: 0.022,
-    });
-    titlePanel.position.set(0, -0.036, 0);
-    this.logoGroup.add(titlePanel);
-
-    const statsPanel = this.createStatsPanel({
-      leftValue: '50+',
-      leftLabel: 'Teams',
-      rightValue: '200+',
-      rightLabel: 'hackers',
-      worldHeight: 0.026,
-    });
-    statsPanel.position.set(0, -0.056, 0);
-    this.logoGroup.add(statsPanel);
+  updateHeadPose(headPose: HeadPose): void {
+    this.currentHeadPose = headPose;
+    this.needsRender = true;
   }
 
-  private createCardPanel(options: {
-    worldWidth: number;
-    worldHeight: number;
-    backgroundColor: string;
-    borderColor: string;
-    borderRadius: number;
-  }): THREE.Mesh {
-    const logicalWidth = 720;
-    const logicalHeight = Math.round((options.worldHeight / options.worldWidth) * logicalWidth);
-    const scale = 2;
-    const canvas = document.createElement('canvas');
-    canvas.width = logicalWidth * scale;
-    canvas.height = logicalHeight * scale;
+  setDebugMode(enabled: boolean): void {
+    this.debugMode = enabled;
+    this.debugHelpers.forEach((helper) => {
+      helper.visible = enabled;
+    });
+    this.needsRender = true;
+  }
 
-    const context = canvas.getContext('2d');
-    if (!context) {
-      throw new Error('Failed to create 2D canvas context for card panel');
+  updateCalibration(calibration: CalibrationData): void {
+    this.offAxisCamera.updateCalibration(calibration);
+    this.needsRender = true;
+  }
+
+  updateModelPosition(x: number, y: number, z: number): void {
+    this.modelPosition.set(x, y, z);
+    this.applyTransformsToVisibleSplats();
+    this.needsRender = true;
+  }
+
+  updateModelScale(scale: number): void {
+    this.modelScale = scale;
+    this.applyTransformsToVisibleSplats();
+    this.needsRender = true;
+  }
+
+  getModelPosition(): { x: number; y: number; z: number } {
+    return {
+      x: this.modelPosition.x,
+      y: this.modelPosition.y,
+      z: this.modelPosition.z,
+    };
+  }
+
+  getModelScale(): number {
+    return this.modelScale;
+  }
+
+  updateModelRotation(x: number, y: number, z: number): void {
+    this.modelRotation.set(x, y, z);
+    this.applyTransformsToVisibleSplats();
+    this.needsRender = true;
+  }
+
+  getModelRotation(): { x: number; y: number; z: number } {
+    return {
+      x: this.modelRotation.x,
+      y: this.modelRotation.y,
+      z: this.modelRotation.z,
+    };
+  }
+
+  private applyCurrentTransform(mesh: SplatMesh): void {
+    mesh.position.copy(this.modelPosition);
+    mesh.scale.setScalar(this.modelScale);
+    mesh.rotation.copy(this.modelRotation);
+  }
+
+  private applyTransformsToVisibleSplats(): void {
+    if (this.activeSplatMesh) {
+      this.applyCurrentTransform(this.activeSplatMesh);
     }
 
-    context.scale(scale, scale);
-    context.clearRect(0, 0, logicalWidth, logicalHeight);
-    this.drawRoundedRect(
-      context,
-      0.5,
-      0.5,
-      logicalWidth - 1,
-      logicalHeight - 1,
-      options.borderRadius
-    );
-    context.fillStyle = options.backgroundColor;
-    context.fill();
-    context.strokeStyle = options.borderColor;
-    context.lineWidth = 1;
-    context.stroke();
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.needsUpdate = true;
-
-    const geometry = new THREE.PlaneGeometry(options.worldWidth, options.worldHeight);
-    const material = new THREE.MeshBasicMaterial({
-      map: texture,
-      transparent: true,
-      side: THREE.DoubleSide,
-    });
-    return new THREE.Mesh(geometry, material);
+    if (this.outgoingSplatMesh) {
+      this.applyCurrentTransform(this.outgoingSplatMesh);
+    }
   }
 
-  private createTextPanel(options: {
-    text: string;
-    fontSize: number;
-    fontWeight: number;
-    textColor: string;
-    paddingX: number;
-    paddingY: number;
-    worldHeight: number;
-    backgroundColor?: string;
-    borderColor?: string;
-    borderRadius?: number;
-  }): THREE.Mesh {
-    const measureCanvas = document.createElement('canvas');
-    const measureContext = measureCanvas.getContext('2d');
-    if (!measureContext) {
-      throw new Error('Failed to create 2D canvas context for text measurement');
+  private updateSplatAnimations(): void {
+    this.activeSplatAnimator?.tick();
+    this.outgoingSplatAnimator?.tick();
+
+    if (this.outgoingSplatAnimator && !this.outgoingSplatAnimator.isAnimating && this.outgoingSplatAnimator.getProgress() <= 0) {
+      this.disposeOutgoingSplat();
     }
-
-    const font = `${options.fontWeight} ${options.fontSize}px Inter, sans-serif`;
-    measureContext.font = font;
-    const metrics = measureContext.measureText(options.text);
-    const textWidth = Math.ceil(metrics.width);
-    const textHeight = Math.ceil(options.fontSize * 1.2);
-    const logicalWidth = textWidth + options.paddingX * 2;
-    const logicalHeight = textHeight + options.paddingY * 2;
-
-    const scale = 2;
-    const canvas = document.createElement('canvas');
-    canvas.width = logicalWidth * scale;
-    canvas.height = logicalHeight * scale;
-
-    const context = canvas.getContext('2d');
-    if (!context) {
-      throw new Error('Failed to create 2D canvas context for text panel');
-    }
-
-    context.scale(scale, scale);
-    context.clearRect(0, 0, logicalWidth, logicalHeight);
-
-    if (options.backgroundColor) {
-      this.drawRoundedRect(
-        context,
-        0.5,
-        0.5,
-        logicalWidth - 1,
-        logicalHeight - 1,
-        options.borderRadius ?? 0
-      );
-      context.fillStyle = options.backgroundColor;
-      context.fill();
-
-      if (options.borderColor) {
-        context.strokeStyle = options.borderColor;
-        context.lineWidth = 1;
-        context.stroke();
-      }
-    }
-
-    context.font = font;
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    context.fillStyle = options.textColor;
-    context.fillText(options.text, logicalWidth / 2, logicalHeight / 2);
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.needsUpdate = true;
-
-    const worldWidth = options.worldHeight * (logicalWidth / logicalHeight);
-    const geometry = new THREE.PlaneGeometry(worldWidth, options.worldHeight);
-    const material = new THREE.MeshBasicMaterial({
-      map: texture,
-      transparent: true,
-      side: THREE.DoubleSide,
-    });
-    const panel = new THREE.Mesh(geometry, material);
-    panel.userData.panelWidth = worldWidth;
-    return panel;
   }
 
-  private createStatsPanel(options: {
-    leftValue: string;
-    leftLabel: string;
-    rightValue: string;
-    rightLabel: string;
-    worldHeight: number;
-  }): THREE.Mesh {
-    const logicalWidth = 620;
-    const logicalHeight = 126;
-    const scale = 2;
-    const canvas = document.createElement('canvas');
-    canvas.width = logicalWidth * scale;
-    canvas.height = logicalHeight * scale;
-
-    const context = canvas.getContext('2d');
-    if (!context) {
-      throw new Error('Failed to create 2D canvas context for stats panel');
+  private disposeOutgoingSplat(): void {
+    if (!this.outgoingSplatMesh) {
+      return;
     }
 
-    context.scale(scale, scale);
-    context.clearRect(0, 0, logicalWidth, logicalHeight);
-
-    const sections = [
-      {
-        centerX: logicalWidth * 0.28,
-        value: options.leftValue,
-        label: options.leftLabel,
-      },
-      {
-        centerX: logicalWidth * 0.72,
-        value: options.rightValue,
-        label: options.rightLabel,
-      },
-    ];
-
-    sections.forEach((section) => {
-      context.textAlign = 'center';
-      context.fillStyle = '#ffffff';
-      context.font = '700 42px Inter, sans-serif';
-      context.textBaseline = 'alphabetic';
-      context.fillText(section.value, section.centerX, 56);
-
-      context.fillStyle = 'rgba(255, 255, 255, 0.82)';
-      context.font = '300 26px Inter, sans-serif';
-      context.textBaseline = 'alphabetic';
-      context.fillText(section.label, section.centerX, 92);
-    });
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.needsUpdate = true;
-
-    const worldWidth = options.worldHeight * (logicalWidth / logicalHeight);
-    const geometry = new THREE.PlaneGeometry(worldWidth, options.worldHeight);
-    const material = new THREE.MeshBasicMaterial({
-      map: texture,
-      transparent: true,
-      side: THREE.DoubleSide,
-    });
-    const panel = new THREE.Mesh(geometry, material);
-    panel.userData.panelWidth = worldWidth;
-    return panel;
-  }
-
-  private drawRoundedRect(
-    context: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    width: number,
-    height: number,
-    radius: number
-  ): void {
-    const clampedRadius = Math.min(radius, width / 2, height / 2);
-    context.beginPath();
-    context.moveTo(x + clampedRadius, y);
-    context.lineTo(x + width - clampedRadius, y);
-    context.quadraticCurveTo(x + width, y, x + width, y + clampedRadius);
-    context.lineTo(x + width, y + height - clampedRadius);
-    context.quadraticCurveTo(x + width, y + height, x + width - clampedRadius, y + height);
-    context.lineTo(x + clampedRadius, y + height);
-    context.quadraticCurveTo(x, y + height, x, y + height - clampedRadius);
-    context.lineTo(x, y + clampedRadius);
-    context.quadraticCurveTo(x, y, x + clampedRadius, y);
-    context.closePath();
-  }
-
-  private disposeObject3D(object: THREE.Object3D): void {
-    object.traverse((child) => {
-      if (child instanceof THREE.Mesh) {
-        child.geometry.dispose();
-
-        const materials = Array.isArray(child.material) ? child.material : [child.material];
-        materials.forEach((material) => {
-          if ('map' in material && material.map) {
-            material.map.dispose();
-          }
-          material.dispose();
-        });
-      }
-    });
+    this.scene.remove(this.outgoingSplatMesh);
+    this.outgoingSplatMesh = null;
+    this.outgoingSplatAnimator = null;
+    this.needsRender = true;
   }
 
   private createDebugHelpers(): void {
@@ -396,73 +331,21 @@ export class ThreeSceneManager {
     this.scene.add(headPositionMarker);
   }
 
-  updateHeadPose(headPose: HeadPose): void {
-    this.currentHeadPose = headPose;
-  }
-
-  setDebugMode(enabled: boolean): void {
-    this.debugMode = enabled;
-    this.debugHelpers.forEach(helper => {
-      helper.visible = enabled;
-    });
-  }
-
-  updateCalibration(calibration: CalibrationData): void {
-    this.offAxisCamera.updateCalibration(calibration);
-  }
-
-  updateModelPosition(x: number, y: number, z: number): void {
-    if (this.model) {
-      this.model.position.set(x, y, z);
-    }
-  }
-
-  updateModelScale(scale: number): void {
-    if (this.model) {
-      this.model.scale.set(scale, scale, scale);
-    }
-  }
-
-  getModelPosition(): { x: number; y: number; z: number } {
-    if (this.model) {
-      return {
-        x: this.model.position.x,
-        y: this.model.position.y,
-        z: this.model.position.z
-      };
-    }
-    return { x: 0, y: -0.09, z: -0.03 };
-  }
-
-  getModelScale(): number {
-    if (this.model) {
-      return this.model.scale.x;
-    }
-    return 0.071;
-  }
-
-  updateModelRotation(x: number, y: number, z: number): void {
-    if (this.model) {
-      this.model.rotation.set(x, y, z);
-    }
-  }
-
-  getModelRotation(): { x: number; y: number; z: number } {
-    if (this.model) {
-      return {
-        x: this.model.rotation.x,
-        y: this.model.rotation.y,
-        z: this.model.rotation.z
-      };
-    }
-    return { x: 0, y: -0.628, z: 0 };
-  }
-
   private animate = (): void => {
-    if (!this.isRunning) return;
+    if (!this.isRunning) {
+      return;
+    }
 
     this.animationFrameId = requestAnimationFrame(this.animate);
+    const hadActiveAnimations = Boolean(
+      this.activeSplatAnimator?.isAnimating || this.outgoingSplatAnimator?.isAnimating
+    );
 
+    if (!this.needsRender && !hadActiveAnimations) {
+      return;
+    }
+
+    this.updateSplatAnimations();
     this.offAxisCamera.updateFromHeadPose(this.currentHeadPose);
 
     if (this.debugMode && this.debugHelpers.length > 1) {
@@ -471,6 +354,9 @@ export class ThreeSceneManager {
     }
 
     this.renderer.render(this.scene, this.camera);
+    this.needsRender = Boolean(
+      this.activeSplatAnimator?.isAnimating || this.outgoingSplatAnimator?.isAnimating
+    );
   };
 
   start(): void {
@@ -490,6 +376,7 @@ export class ThreeSceneManager {
 
   resize(width: number, height: number): void {
     this.applyRendererLayout(width, height);
+    this.needsRender = true;
   }
 
   private applyRendererLayout(containerWidth: number, containerHeight: number): void {
@@ -515,26 +402,18 @@ export class ThreeSceneManager {
   dispose(): void {
     this.stop();
 
-    if (this.model) {
-      this.model.traverse((child) => {
-        if (child instanceof THREE.Mesh) {
-          child.geometry.dispose();
-          if (child.material instanceof THREE.Material) {
-            child.material.dispose();
-          }
-        }
-      });
+    if (this.activeSplatMesh) {
+      this.scene.remove(this.activeSplatMesh);
+      this.activeSplatMesh = null;
+      this.activeSplatAnimator = null;
     }
 
-    if (this.splatMesh) {
-      this.splatMesh.dispose();
-    }
-
-    if (this.logoGroup) {
-      this.disposeObject3D(this.logoGroup);
-      this.scene.remove(this.logoGroup);
-    }
-
+    this.disposeOutgoingSplat();
+    this.splatCache.forEach((entry) => {
+      entry.animator.dispose();
+      entry.mesh.dispose();
+    });
+    this.splatCache.clear();
     this.sparkRenderer.dispose();
     this.renderer.dispose();
 
