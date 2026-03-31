@@ -10,7 +10,7 @@ The `models` directory is specifically for 3D model files like `.glb` models.
 
 1. Upload your `.glb` files to the `models` directory
 2. Access them in your application at `/models/your-model.glb`
-
+.
 Example:
 ```javascript
 // In your React component
