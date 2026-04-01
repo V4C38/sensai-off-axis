@@ -3,7 +3,8 @@ import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark';
 import { HeadPose } from './headPose';
 import { OffAxisCamera } from './offAxisCamera';
 import { calibrationManager, CalibrationData } from './calibration';
-import { ALL_SPLAT_INDICES, assertValidSplatIndex, SplatIndex } from './sceneConfig';
+
+const SINGLE_SPLAT_URL = '/media/demoSplat.ply';
 
 export interface ThreeSceneOptions {
   container: HTMLElement;
@@ -11,16 +12,9 @@ export interface ThreeSceneOptions {
   height?: number;
 }
 
-interface CachedSplatEntry {
-  mesh: SplatMesh;
-  initialized: Promise<void>;
-}
-
 const MAX_RENDER_PIXEL_RATIO = 1.25;
 const LOD_SPLAT_COUNT = 1000000;
 const LOD_RENDER_SCALE = 1.0;
-/** How long both splats stay in the scene after the new one is ready (then previous is removed). */
-const SPLAT_PREVIOUS_UNLOAD_DELAY_MS = 200;
 
 export class ThreeSceneManager {
   private container: HTMLElement;
@@ -30,14 +24,10 @@ export class ThreeSceneManager {
   private sparkRenderer: SparkRenderer;
   private offAxisCamera: OffAxisCamera;
   private activeSplatMesh: SplatMesh | null = null;
-  private currentSplatIndex: SplatIndex = 1;
   private splatForwardOffset = 0.0;
   private modelPosition = new THREE.Vector3(0, -0.02, this.splatForwardOffset);
   private modelScale = 0.05;
   private modelRotation = new THREE.Euler(0, 0, 0);
-  private readonly splatCache = new Map<SplatIndex, CachedSplatEntry>();
-  private preloadAllSplatsPromise: Promise<void> | null = null;
-  private loadRequestId = 0;
   private lodSplatCount = LOD_SPLAT_COUNT;
   private lodRenderScale = LOD_RENDER_SCALE;
   private renderAspect: number;
@@ -47,6 +37,7 @@ export class ThreeSceneManager {
   private currentHeadPose: HeadPose = { x: 0.5, y: 0.5, z: 1 };
   private debugMode = false;
   private debugHelpers: THREE.Object3D[] = [];
+  private disposed = false;
 
   constructor(options: ThreeSceneOptions) {
     const width = options.width || options.container.clientWidth;
@@ -96,89 +87,27 @@ export class ThreeSceneManager {
     this.scene.add(this.sparkRenderer);
 
     this.createDebugHelpers();
-    void this.preloadAllSplats();
+    void this.mountSingleSplatWhenReady();
   }
 
-  async preloadAllSplats(): Promise<void> {
-    if (this.preloadAllSplatsPromise) {
-      return this.preloadAllSplatsPromise;
-    }
-
-    this.preloadAllSplatsPromise = Promise.all(
-      ALL_SPLAT_INDICES.map(async (index) => {
-        const entry = this.getOrCreateSplatEntry(index);
-        await entry.initialized;
-      })
-    ).then(() => {
-      this.needsRender = true;
-    });
-
-    return this.preloadAllSplatsPromise;
-  }
-
-  async prepareSplat(index: SplatIndex): Promise<void> {
-    assertValidSplatIndex(index);
-
-    const entry = this.getOrCreateSplatEntry(index);
-    await entry.initialized;
-
-    this.needsRender = true;
-  }
-
-  async showSplat(index: SplatIndex, crossfade: boolean = true): Promise<void> {
-    void crossfade;
-    assertValidSplatIndex(index);
-
-    if (this.activeSplatMesh && this.currentSplatIndex === index) {
-      return;
-    }
-
-    const requestId = ++this.loadRequestId;
-    const entry = this.getOrCreateSplatEntry(index);
-    await entry.initialized;
-
-    if (requestId !== this.loadRequestId) {
-      return;
-    }
-
-    this.applyCurrentTransform(entry.mesh);
-    const previousMesh = this.activeSplatMesh;
-
-    this.scene.add(entry.mesh);
-    this.activeSplatMesh = entry.mesh;
-    this.currentSplatIndex = index;
-    this.needsRender = true;
-
-    if (previousMesh && previousMesh !== entry.mesh) {
-      await new Promise<void>((r) => setTimeout(r, SPLAT_PREVIOUS_UNLOAD_DELAY_MS));
-      this.scene.remove(previousMesh);
-      this.needsRender = true;
-    }
-  }
-
-  private getSplatUrl(index: SplatIndex): string {
-    return `/media/${index}.ply`;
-  }
-
-  private getOrCreateSplatEntry(index: SplatIndex): CachedSplatEntry {
-    const cachedEntry = this.splatCache.get(index);
-    if (cachedEntry) {
-      return cachedEntry;
-    }
-
+  private async mountSingleSplatWhenReady(): Promise<void> {
     const mesh = new SplatMesh({
-      url: this.getSplatUrl(index),
+      url: SINGLE_SPLAT_URL,
       lod: true,
       lodScale: 1.0,
     });
     this.applyCurrentTransform(mesh);
 
-    const entry: CachedSplatEntry = {
-      mesh,
-      initialized: mesh.initialized.then(() => undefined),
-    };
-    this.splatCache.set(index, entry);
-    return entry;
+    await mesh.initialized;
+
+    if (this.disposed) {
+      mesh.dispose();
+      return;
+    }
+
+    this.scene.add(mesh);
+    this.activeSplatMesh = mesh;
+    this.needsRender = true;
   }
 
   updateHeadPose(headPose: HeadPose): void {
@@ -337,16 +266,14 @@ export class ThreeSceneManager {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.stop();
 
     if (this.activeSplatMesh) {
       this.scene.remove(this.activeSplatMesh);
+      this.activeSplatMesh.dispose();
       this.activeSplatMesh = null;
     }
-    this.splatCache.forEach((entry) => {
-      entry.mesh.dispose();
-    });
-    this.splatCache.clear();
     this.sparkRenderer.dispose();
     this.renderer.dispose();
 

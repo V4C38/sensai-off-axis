@@ -6,28 +6,16 @@ import CalibrationWizard from './components/CalibrationWizard';
 import ShoeControlPanel from './components/ShoeControlPanel';
 import { HeadPose, HeadPoseTracker } from './utils/headPose';
 import { calibrationManager, CalibrationData } from './utils/calibration';
-import { SplatIndex } from './utils/sceneConfig';
-import {
-  CAPTION_FADE_DURATION_SECONDS,
-  INITIAL_SEQUENCE_DELAY_SECONDS,
-  PRESENTATION_SEQUENCE,
-} from './utils/presentationScript';
 
 function App() {
   const [isCdnAvailable, setIsCdnAvailable] = useState(true);
   const [isCheckingCdn, setIsCheckingCdn] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showCalibration, setShowCalibration] = useState(false);
-  const [calibration, setCalibration] = useState<CalibrationData>(calibrationManager.getCalibration());
   const [debugMode, setDebugMode] = useState(false);
   const [shoePosition, setShoePosition] = useState({ x: 0, y: -0.09, z: -0.03 });
   const [shoeScale, setShoeScale] = useState(0.071);
   const [shoeRotation, setShoeRotation] = useState({ x: 0, y: -0.628, z: 0 });
-  const [selectedSplat, setSelectedSplat] = useState<SplatIndex>(1);
-  const [isSequencePlaying, setIsSequencePlaying] = useState(true);
-  const [overlayCaption, setOverlayCaption] = useState<string | null>(null);
-  const [isOverlayCaptionVisible, setIsOverlayCaptionVisible] = useState(false);
-  const [isFirstSceneLoading, setIsFirstSceneLoading] = useState(true);
   const [isCameraViewCollapsed, setIsCameraViewCollapsed] = useState(false);
   const headPoseTrackerRef = useRef(new HeadPoseTracker(0.3));
   const syntheticFaceLandmarksRef = useRef(
@@ -35,17 +23,6 @@ function App() {
   );
   const landmarkBatchRef = useRef([syntheticFaceLandmarksRef.current]);
   const threeViewRef = useRef<ThreeViewHandle>(null);
-  const sequenceRunIdRef = useRef(0);
-  const overlayCaptionRef = useRef<string | null>(null);
-  const overlayCaptionVisibleRef = useRef(false);
-
-  useEffect(() => {
-    overlayCaptionRef.current = overlayCaption;
-  }, [overlayCaption]);
-
-  useEffect(() => {
-    overlayCaptionVisibleRef.current = isOverlayCaptionVisible;
-  }, [isOverlayCaptionVisible]);
 
   useEffect(() => {
     const checkCdnAvailability = async () => {
@@ -139,7 +116,6 @@ function App() {
   }, []);
 
   const handleCalibrationComplete = (newCalibration: CalibrationData) => {
-    setCalibration(newCalibration);
     if (threeViewRef.current) {
       threeViewRef.current.updateCalibration(newCalibration);
     }
@@ -174,166 +150,6 @@ function App() {
     }
   };
 
-  const handleSplatChange = (index: SplatIndex) => {
-    setIsSequencePlaying(false);
-    setSelectedSplat(index);
-  };
-
-  const handleSequencePlayingChange = (isPlaying: boolean) => {
-    setIsSequencePlaying(isPlaying);
-  };
-
-  useEffect(() => {
-    if (isSequencePlaying) {
-      return;
-    }
-
-    setOverlayCaption(null);
-    setIsOverlayCaptionVisible(false);
-    if (threeViewRef.current) {
-      void threeViewRef.current.showSplat(selectedSplat, true);
-    }
-  }, [isSequencePlaying, selectedSplat]);
-
-  useEffect(() => {
-    if (!isSequencePlaying) {
-      sequenceRunIdRef.current += 1;
-      setIsFirstSceneLoading(false);
-      return;
-    }
-
-    const runId = sequenceRunIdRef.current + 1;
-    sequenceRunIdRef.current = runId;
-
-    const ensureCurrentRun = () => {
-      if (sequenceRunIdRef.current !== runId) {
-        throw new Error('Sequence playback cancelled');
-      }
-    };
-
-    const waitForSeconds = async (durationSeconds: number) => {
-      if (durationSeconds <= 0) {
-        ensureCurrentRun();
-        return;
-      }
-
-      await new Promise<void>((resolve) => {
-        window.setTimeout(resolve, durationSeconds * 1000);
-      });
-      ensureCurrentRun();
-    };
-
-    const fadeOutCaption = async (durationSeconds: number) => {
-      if (!overlayCaptionVisibleRef.current) {
-        return;
-      }
-
-      setIsOverlayCaptionVisible(false);
-      await waitForSeconds(durationSeconds);
-    };
-
-    const fadeInCaption = async (text: string, durationSeconds: number, syncPromise?: Promise<void>) => {
-      if (syncPromise) {
-        await syncPromise;
-        ensureCurrentRun();
-      }
-
-      setOverlayCaption(text);
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      ensureCurrentRun();
-      setIsOverlayCaptionVisible(true);
-
-      await waitForSeconds(durationSeconds);
-    };
-
-    const showCaption = async (
-      text: string,
-      durationSeconds: number,
-      syncPromise?: Promise<void>
-    ) => {
-      if (overlayCaptionRef.current !== null) {
-        await fadeOutCaption(CAPTION_FADE_DURATION_SECONDS);
-      }
-
-      await fadeInCaption(text, CAPTION_FADE_DURATION_SECONDS, syncPromise);
-      await waitForSeconds(durationSeconds);
-    };
-
-    const playSequence = async () => {
-      if (!threeViewRef.current) {
-        return;
-      }
-
-      const startSceneIndex = PRESENTATION_SEQUENCE.findIndex((scene) => scene.splatIndex === selectedSplat);
-      const orderedScenes = startSceneIndex >= 0
-        ? [
-            ...PRESENTATION_SEQUENCE.slice(startSceneIndex),
-            ...PRESENTATION_SEQUENCE.slice(0, startSceneIndex),
-          ]
-        : [...PRESENTATION_SEQUENCE];
-
-      const [initialScene] = orderedScenes;
-      if (initialScene) {
-        setIsFirstSceneLoading(true);
-        await threeViewRef.current.preloadAllSplats();
-        ensureCurrentRun();
-        setSelectedSplat(initialScene.splatIndex);
-        await threeViewRef.current.showSplat(initialScene.splatIndex, false);
-        setIsFirstSceneLoading(false);
-        await waitForSeconds(INITIAL_SEQUENCE_DELAY_SECONDS);
-        ensureCurrentRun();
-      }
-
-      let isFirstScene = true;
-      while (sequenceRunIdRef.current === runId) {
-        for (let sceneIndex = 0; sceneIndex < orderedScenes.length; sceneIndex += 1) {
-          const scene = orderedScenes[sceneIndex];
-          ensureCurrentRun();
-          const nextScene = orderedScenes[(sceneIndex + 1) % orderedScenes.length];
-
-          if (nextScene) {
-            void threeViewRef.current.prepareSplat(nextScene.splatIndex);
-          }
-
-          setSelectedSplat(scene.splatIndex);
-          const splatTransition = isFirstScene
-            ? Promise.resolve()
-            : threeViewRef.current.showSplat(scene.splatIndex, true);
-
-          const [firstCaption, ...remainingCaptions] = scene.captions;
-          if (firstCaption) {
-            if (isFirstScene) {
-              await showCaption(firstCaption.text, firstCaption.durationSeconds);
-            } else {
-              await showCaption(firstCaption.text, firstCaption.durationSeconds, splatTransition);
-            }
-          } else if (!isFirstScene) {
-            await splatTransition;
-          }
-
-          isFirstScene = false;
-
-          for (const caption of remainingCaptions) {
-            ensureCurrentRun();
-            await showCaption(caption.text, caption.durationSeconds);
-          }
-        }
-      }
-    };
-
-    void playSequence().catch((error: unknown) => {
-      if (error instanceof Error && error.message === 'Sequence playback cancelled') {
-        return;
-      }
-
-      throw error;
-    });
-
-    return () => {
-      sequenceRunIdRef.current += 1;
-    };
-  }, [isSequencePlaying]);
-
   useEffect(() => {
     const timer = setTimeout(() => {
       if (threeViewRef.current) {
@@ -362,31 +178,6 @@ function App() {
         <div className="absolute inset-0">
           <ThreeView ref={threeViewRef} />
         </div>
-
-        {isFirstSceneLoading && isSequencePlaying && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
-            <div className="rounded bg-black bg-opacity-55 px-4 py-2 text-center text-sm font-medium text-white shadow-lg backdrop-blur-sm">
-              Loading first scene...
-            </div>
-          </div>
-        )}
-
-        {overlayCaption && (
-          <div className="absolute inset-x-0 bottom-40 z-20 flex justify-center pointer-events-none">
-            <div
-              className={`max-w-none whitespace-nowrap text-center text-white font-black leading-none tracking-tight transition-opacity duration-200 ${
-                isOverlayCaptionVisible ? 'opacity-100' : 'opacity-0'
-              }`}
-              style={{
-                fontSize: 'clamp(2.35rem, 4.75vw, 4.45rem)',
-                textShadow:
-                  '0 1px 0 rgba(0, 0, 0, 1), 0 3px 0 rgba(0, 0, 0, 0.92), 0 6px 0 rgba(0, 0, 0, 0.78), 0 10px 18px rgba(0, 0, 0, 0.65), 0 0 32px rgba(0, 0, 0, 0.82), 0 18px 40px rgba(0, 0, 0, 0.55)',
-              }}
-            >
-              {overlayCaption}
-            </div>
-          </div>
-        )}
 
         <ShoeControlPanel
           onPositionChange={handleShoePositionChange}
@@ -469,10 +260,6 @@ function App() {
           onComplete={handleCalibrationComplete}
           onSkip={() => setShowCalibration(false)}
           onClose={() => setShowCalibration(false)}
-          selectedSplat={selectedSplat}
-          onSplatChange={handleSplatChange}
-          isSequencePlaying={isSequencePlaying}
-          onSequencePlayingChange={handleSequencePlayingChange}
         />
       )}
     </div>

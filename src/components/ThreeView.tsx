@@ -2,15 +2,11 @@ import React, { useRef, useEffect, forwardRef, useImperativeHandle } from 'react
 import { ThreeSceneManager } from '../utils/threeScene';
 import { HeadPose } from '../utils/headPose';
 import { CalibrationData } from '../utils/calibration';
-import { SplatIndex } from '../utils/sceneConfig';
 
 export interface ThreeViewHandle {
-  preloadAllSplats: () => Promise<void>;
-  prepareSplat: (index: SplatIndex) => Promise<void>;
   updateHeadPose: (headPose: HeadPose) => void;
   updateCalibration: (calibration: CalibrationData) => void;
   setDebugMode: (enabled: boolean) => void;
-  showSplat: (index: SplatIndex, crossfade?: boolean) => Promise<void>;
   updateModelPosition: (x: number, y: number, z: number) => void;
   updateModelScale: (scale: number) => void;
   updateModelRotation: (x: number, y: number, z: number) => void;
@@ -57,16 +53,6 @@ const ThreeView = forwardRef<ThreeViewHandle>((_, ref) => {
   }, []);
 
   useImperativeHandle(ref, () => ({
-    preloadAllSplats: async () => {
-      if (sceneManagerRef.current) {
-        await sceneManagerRef.current.preloadAllSplats();
-      }
-    },
-    prepareSplat: async (index: SplatIndex) => {
-      if (sceneManagerRef.current) {
-        await sceneManagerRef.current.prepareSplat(index);
-      }
-    },
     updateHeadPose: (headPose: HeadPose) => {
       if (sceneManagerRef.current) {
         sceneManagerRef.current.updateHeadPose(headPose);
@@ -80,11 +66,6 @@ const ThreeView = forwardRef<ThreeViewHandle>((_, ref) => {
     setDebugMode: (enabled: boolean) => {
       if (sceneManagerRef.current) {
         sceneManagerRef.current.setDebugMode(enabled);
-      }
-    },
-    showSplat: async (index: SplatIndex, crossfade: boolean = true) => {
-      if (sceneManagerRef.current) {
-        await sceneManagerRef.current.showSplat(index, crossfade);
       }
     },
     updateModelPosition: (x: number, y: number, z: number) => {
