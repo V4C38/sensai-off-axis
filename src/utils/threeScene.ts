@@ -1,9 +1,9 @@
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { DRACOLoader } from 'three/examples/jsm/loaders/DRACOLoader.js';
+import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark';
 import { HeadPose } from './headPose';
 import { OffAxisCamera } from './offAxisCamera';
 import { calibrationManager, CalibrationData } from './calibration';
+import { ALL_SPLAT_INDICES, assertValidSplatIndex, SplatIndex } from './sceneConfig';
 
 export interface ThreeSceneOptions {
   container: HTMLElement;
@@ -11,30 +11,57 @@ export interface ThreeSceneOptions {
   height?: number;
 }
 
+interface CachedSplatEntry {
+  mesh: SplatMesh;
+  initialized: Promise<void>;
+}
+
+const MAX_RENDER_PIXEL_RATIO = 1.25;
+const LOD_SPLAT_COUNT = 1000000;
+const LOD_RENDER_SCALE = 1.0;
+/** How long both splats stay in the scene after the new one is ready (then previous is removed). */
+const SPLAT_PREVIOUS_UNLOAD_DELAY_MS = 200;
+
 export class ThreeSceneManager {
+  private container: HTMLElement;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private renderer: THREE.WebGLRenderer;
+  private sparkRenderer: SparkRenderer;
   private offAxisCamera: OffAxisCamera;
-  private model: THREE.Object3D | null = null;
+  private activeSplatMesh: SplatMesh | null = null;
+  private currentSplatIndex: SplatIndex = 1;
+  private splatForwardOffset = 0.0;
+  private modelPosition = new THREE.Vector3(0, -0.02, this.splatForwardOffset);
+  private modelScale = 0.05;
+  private modelRotation = new THREE.Euler(0, 0, 0);
+  private readonly splatCache = new Map<SplatIndex, CachedSplatEntry>();
+  private preloadAllSplatsPromise: Promise<void> | null = null;
+  private loadRequestId = 0;
+  private lodSplatCount = LOD_SPLAT_COUNT;
+  private lodRenderScale = LOD_RENDER_SCALE;
+  private renderAspect: number;
   private animationFrameId: number | null = null;
   private isRunning = false;
+  private needsRender = true;
   private currentHeadPose: HeadPose = { x: 0.5, y: 0.5, z: 1 };
-  private debugMode: boolean = false;
+  private debugMode = false;
   private debugHelpers: THREE.Object3D[] = [];
-  private roomObjects: THREE.Object3D[] = [];
 
   constructor(options: ThreeSceneOptions) {
     const width = options.width || options.container.clientWidth;
     const height = options.height || options.container.clientHeight;
 
+    this.container = options.container;
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x1a1a1a);
+    this.scene.background = new THREE.Color(0xffffff);
 
-    this.camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1000);
-    this.camera.position.z = 5;
+    this.camera = new THREE.PerspectiveCamera(200, width / height, 0.1, 1000);
+    this.camera.position.set(0, 0, -25);
 
     const calibration = calibrationManager.getCalibration();
+    this.renderAspect = this.getRenderAspect(calibration);
+
     calibration.pixelWidth = width;
     calibration.pixelHeight = height;
     calibrationManager.updatePixelDimensions(width, height);
@@ -42,150 +69,186 @@ export class ThreeSceneManager {
     this.offAxisCamera = new OffAxisCamera(this.camera, calibration);
 
     this.renderer = new THREE.WebGLRenderer({
-      antialias: true,
-      alpha: false
+      antialias: false,
+      alpha: false,
+      powerPreference: 'high-performance',
     });
-    this.renderer.setSize(width, height);
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.setClearColor(0xffffff, 1);
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_RENDER_PIXEL_RATIO));
+    this.renderer.domElement.style.position = 'absolute';
+    this.renderer.domElement.style.left = '50%';
+    this.renderer.domElement.style.top = '50%';
+    this.renderer.domElement.style.transform = 'translate(-50%, -50%)';
+    this.renderer.domElement.style.display = 'block';
+    this.renderer.domElement.style.maxWidth = 'none';
+    this.renderer.domElement.style.maxHeight = 'none';
     options.container.appendChild(this.renderer.domElement);
+    this.applyRendererLayout(width, height);
 
-    this.loadShoeModel();
-    this.createWireframeRoom();
+    this.sparkRenderer = new SparkRenderer({
+      renderer: this.renderer,
+      enableLod: true,
+      lodSplatCount: this.lodSplatCount,
+      lodRenderScale: this.lodRenderScale,
+      sortRadial: false,
+      behindFoveate: 0.2,
+    });
+    this.scene.add(this.sparkRenderer);
+
     this.createDebugHelpers();
+    void this.preloadAllSplats();
   }
 
-  private loadShoeModel(): void {
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-    this.scene.add(ambientLight);
+  async preloadAllSplats(): Promise<void> {
+    if (this.preloadAllSplatsPromise) {
+      return this.preloadAllSplatsPromise;
+    }
 
-    const directionalLight1 = new THREE.DirectionalLight(0xffffff, 0.8);
-    directionalLight1.position.set(1, 1, 1);
-    this.scene.add(directionalLight1);
-
-    const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.5);
-    directionalLight2.position.set(-1, -1, 0.5);
-    this.scene.add(directionalLight2);
-
-    const dracoLoader = new DRACOLoader();
-    dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
-    dracoLoader.setDecoderConfig({ type: 'js' });
-
-    const loader = new GLTFLoader();
-    loader.setDRACOLoader(dracoLoader);
-
-    loader.load(
-      '/models/shoe.glb',
-      (gltf) => {
-        this.model = gltf.scene;
-        this.model.position.set(0, -0.09, -0.03);
-        this.model.rotation.set(0, -0.628, 0);
-        this.model.scale.set(0.071, 0.071, 0.071);
-        this.scene.add(this.model);
-      },
-      undefined,
-      (error) => {
-        console.error('Error loading shoe model:', error);
-      }
-    );
-  }
-
-  private createWireframeRoom(): void {
-    this.removeWireframeRoom();
-
-    const screenDims = this.offAxisCamera.getScreenDimensions();
-    const roomWidth = screenDims.width;
-    const roomHeight = screenDims.height;
-    const roomDepth = 0.35;
-    const gridDivisions = 8;
-    const gridColor = 0xff8c00;
-
-    const wallMaterial = new THREE.LineBasicMaterial({
-      color: gridColor,
-      transparent: true,
-      opacity: 0.8,
-      depthTest: true,
-      depthWrite: true,
-      linewidth: 8
-    });
-
-    const createGridWall = (width: number, height: number): THREE.LineSegments => {
-      const geometry = new THREE.BufferGeometry();
-      const vertices: number[] = [];
-
-      for (let i = 0; i <= gridDivisions; i++) {
-        const t = i / gridDivisions;
-        vertices.push(-width / 2 + t * width, -height / 2, 0);
-        vertices.push(-width / 2 + t * width, height / 2, 0);
-      }
-
-      for (let i = 0; i <= gridDivisions; i++) {
-        const t = i / gridDivisions;
-        vertices.push(-width / 2, -height / 2 + t * height, 0);
-        vertices.push(width / 2, -height / 2 + t * height, 0);
-      }
-
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-      return new THREE.LineSegments(geometry, wallMaterial);
-    };
-
-    const backWall = createGridWall(roomWidth, roomHeight);
-    backWall.position.z = -roomDepth;
-    this.scene.add(backWall);
-    this.roomObjects.push(backWall);
-
-    const leftWall = createGridWall(roomDepth, roomHeight);
-    leftWall.rotation.y = Math.PI / 2;
-    leftWall.position.x = -roomWidth / 2;
-    leftWall.position.z = -roomDepth / 2;
-    this.scene.add(leftWall);
-    this.roomObjects.push(leftWall);
-
-    const rightWall = createGridWall(roomDepth, roomHeight);
-    rightWall.rotation.y = -Math.PI / 2;
-    rightWall.position.x = roomWidth / 2;
-    rightWall.position.z = -roomDepth / 2;
-    this.scene.add(rightWall);
-    this.roomObjects.push(rightWall);
-
-    const floor = createGridWall(roomWidth, roomDepth);
-    floor.rotation.x = Math.PI / 2;
-    floor.position.y = -roomHeight / 2;
-    floor.position.z = -roomDepth / 2;
-    this.scene.add(floor);
-    this.roomObjects.push(floor);
-
-    const ceiling = createGridWall(roomWidth, roomDepth);
-    ceiling.rotation.x = -Math.PI / 2;
-    ceiling.position.y = roomHeight / 2;
-    ceiling.position.z = -roomDepth / 2;
-    this.scene.add(ceiling);
-    this.roomObjects.push(ceiling);
-
-    const screenFrame = new THREE.LineSegments(
-      new THREE.EdgesGeometry(new THREE.PlaneGeometry(roomWidth, roomHeight)),
-      new THREE.LineBasicMaterial({
-        color: 0xff0000,
-        linewidth: 4,
-        depthTest: true,
-        depthWrite: true
+    this.preloadAllSplatsPromise = Promise.all(
+      ALL_SPLAT_INDICES.map(async (index) => {
+        const entry = this.getOrCreateSplatEntry(index);
+        await entry.initialized;
       })
-    );
-    screenFrame.position.z = 0.001;
-    this.scene.add(screenFrame);
-    this.roomObjects.push(screenFrame);
+    ).then(() => {
+      this.needsRender = true;
+    });
+
+    return this.preloadAllSplatsPromise;
   }
 
-  private removeWireframeRoom(): void {
-    this.roomObjects.forEach(obj => {
-      this.scene.remove(obj);
-      if (obj instanceof THREE.LineSegments) {
-        obj.geometry.dispose();
-        if (obj.material instanceof THREE.Material) {
-          obj.material.dispose();
-        }
-      }
+  async prepareSplat(index: SplatIndex): Promise<void> {
+    assertValidSplatIndex(index);
+
+    const entry = this.getOrCreateSplatEntry(index);
+    await entry.initialized;
+
+    this.needsRender = true;
+  }
+
+  async showSplat(index: SplatIndex, crossfade: boolean = true): Promise<void> {
+    void crossfade;
+    assertValidSplatIndex(index);
+
+    if (this.activeSplatMesh && this.currentSplatIndex === index) {
+      return;
+    }
+
+    const requestId = ++this.loadRequestId;
+    const entry = this.getOrCreateSplatEntry(index);
+    await entry.initialized;
+
+    if (requestId !== this.loadRequestId) {
+      return;
+    }
+
+    this.applyCurrentTransform(entry.mesh);
+    const previousMesh = this.activeSplatMesh;
+
+    this.scene.add(entry.mesh);
+    this.activeSplatMesh = entry.mesh;
+    this.currentSplatIndex = index;
+    this.needsRender = true;
+
+    if (previousMesh && previousMesh !== entry.mesh) {
+      await new Promise<void>((r) => setTimeout(r, SPLAT_PREVIOUS_UNLOAD_DELAY_MS));
+      this.scene.remove(previousMesh);
+      this.needsRender = true;
+    }
+  }
+
+  private getSplatUrl(index: SplatIndex): string {
+    return `/media/${index}.ply`;
+  }
+
+  private getOrCreateSplatEntry(index: SplatIndex): CachedSplatEntry {
+    const cachedEntry = this.splatCache.get(index);
+    if (cachedEntry) {
+      return cachedEntry;
+    }
+
+    const mesh = new SplatMesh({
+      url: this.getSplatUrl(index),
+      lod: true,
+      lodScale: 1.0,
     });
-    this.roomObjects = [];
+    this.applyCurrentTransform(mesh);
+
+    const entry: CachedSplatEntry = {
+      mesh,
+      initialized: mesh.initialized.then(() => undefined),
+    };
+    this.splatCache.set(index, entry);
+    return entry;
+  }
+
+  updateHeadPose(headPose: HeadPose): void {
+    this.currentHeadPose = headPose;
+    this.needsRender = true;
+  }
+
+  setDebugMode(enabled: boolean): void {
+    this.debugMode = enabled;
+    this.debugHelpers.forEach((helper) => {
+      helper.visible = enabled;
+    });
+    this.needsRender = true;
+  }
+
+  updateCalibration(calibration: CalibrationData): void {
+    this.offAxisCamera.updateCalibration(calibration);
+    this.renderAspect = this.getRenderAspect(calibration);
+    this.applyRendererLayout(this.container.clientWidth, this.container.clientHeight);
+    this.needsRender = true;
+  }
+
+  updateModelPosition(x: number, y: number, z: number): void {
+    this.modelPosition.set(x, y, z);
+    this.applyTransformsToVisibleSplats();
+    this.needsRender = true;
+  }
+
+  updateModelScale(scale: number): void {
+    this.modelScale = scale;
+    this.applyTransformsToVisibleSplats();
+    this.needsRender = true;
+  }
+
+  getModelPosition(): { x: number; y: number; z: number } {
+    return {
+      x: this.modelPosition.x,
+      y: this.modelPosition.y,
+      z: this.modelPosition.z,
+    };
+  }
+
+  getModelScale(): number {
+    return this.modelScale;
+  }
+
+  updateModelRotation(x: number, y: number, z: number): void {
+    this.modelRotation.set(x, y, z);
+    this.applyTransformsToVisibleSplats();
+    this.needsRender = true;
+  }
+
+  getModelRotation(): { x: number; y: number; z: number } {
+    return {
+      x: this.modelRotation.x,
+      y: this.modelRotation.y,
+      z: this.modelRotation.z,
+    };
+  }
+
+  private applyCurrentTransform(mesh: SplatMesh): void {
+    mesh.position.copy(this.modelPosition);
+    mesh.scale.setScalar(this.modelScale);
+    mesh.rotation.copy(this.modelRotation);
+  }
+
+  private applyTransformsToVisibleSplats(): void {
+    if (this.activeSplatMesh) {
+      this.applyCurrentTransform(this.activeSplatMesh);
+    }
   }
 
   private createDebugHelpers(): void {
@@ -203,73 +266,15 @@ export class ThreeSceneManager {
     this.scene.add(headPositionMarker);
   }
 
-  updateHeadPose(headPose: HeadPose): void {
-    this.currentHeadPose = headPose;
-  }
-
-  setDebugMode(enabled: boolean): void {
-    this.debugMode = enabled;
-    this.debugHelpers.forEach(helper => {
-      helper.visible = enabled;
-    });
-  }
-
-  updateCalibration(calibration: CalibrationData): void {
-    this.offAxisCamera.updateCalibration(calibration);
-    this.createWireframeRoom();
-  }
-
-  updateModelPosition(x: number, y: number, z: number): void {
-    if (this.model) {
-      this.model.position.set(x, y, z);
-    }
-  }
-
-  updateModelScale(scale: number): void {
-    if (this.model) {
-      this.model.scale.set(scale, scale, scale);
-    }
-  }
-
-  getModelPosition(): { x: number; y: number; z: number } {
-    if (this.model) {
-      return {
-        x: this.model.position.x,
-        y: this.model.position.y,
-        z: this.model.position.z
-      };
-    }
-    return { x: 0, y: -0.09, z: -0.03 };
-  }
-
-  getModelScale(): number {
-    if (this.model) {
-      return this.model.scale.x;
-    }
-    return 0.071;
-  }
-
-  updateModelRotation(x: number, y: number, z: number): void {
-    if (this.model) {
-      this.model.rotation.set(x, y, z);
-    }
-  }
-
-  getModelRotation(): { x: number; y: number; z: number } {
-    if (this.model) {
-      return {
-        x: this.model.rotation.x,
-        y: this.model.rotation.y,
-        z: this.model.rotation.z
-      };
-    }
-    return { x: 0, y: -0.628, z: 0 };
-  }
-
   private animate = (): void => {
-    if (!this.isRunning) return;
+    if (!this.isRunning) {
+      return;
+    }
 
     this.animationFrameId = requestAnimationFrame(this.animate);
+    if (!this.needsRender) {
+      return;
+    }
 
     this.offAxisCamera.updateFromHeadPose(this.currentHeadPose);
 
@@ -279,6 +284,7 @@ export class ThreeSceneManager {
     }
 
     this.renderer.render(this.scene, this.camera);
+    this.needsRender = false;
   };
 
   start(): void {
@@ -297,25 +303,51 @@ export class ThreeSceneManager {
   }
 
   resize(width: number, height: number): void {
-    this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
-    this.renderer.setSize(width, height);
+    this.applyRendererLayout(width, height);
+    this.needsRender = true;
+  }
+
+  private getRenderAspect(calibration: CalibrationData): number {
+    const aspect = calibration.screenWidthCm / calibration.screenHeightCm;
+    if (!Number.isFinite(aspect) || aspect <= 0) {
+      throw new Error('Invalid calibration aspect ratio');
+    }
+
+    return aspect;
+  }
+
+  private applyRendererLayout(containerWidth: number, containerHeight: number): void {
+    if (containerWidth <= 0 || containerHeight <= 0) {
+      return;
+    }
+
+    const containerAspect = containerWidth / containerHeight;
+    let renderWidth = containerWidth;
+    let renderHeight = containerHeight;
+
+    if (containerAspect > this.renderAspect) {
+      renderWidth = Math.round(containerHeight * this.renderAspect);
+    } else {
+      renderHeight = Math.round(containerWidth / this.renderAspect);
+    }
+
+    this.renderer.setSize(renderWidth, renderHeight, false);
+    this.renderer.domElement.style.width = `${renderWidth}px`;
+    this.renderer.domElement.style.height = `${renderHeight}px`;
   }
 
   dispose(): void {
     this.stop();
 
-    if (this.model) {
-      this.model.traverse((child) => {
-        if (child instanceof THREE.Mesh) {
-          child.geometry.dispose();
-          if (child.material instanceof THREE.Material) {
-            child.material.dispose();
-          }
-        }
-      });
+    if (this.activeSplatMesh) {
+      this.scene.remove(this.activeSplatMesh);
+      this.activeSplatMesh = null;
     }
-
+    this.splatCache.forEach((entry) => {
+      entry.mesh.dispose();
+    });
+    this.splatCache.clear();
+    this.sparkRenderer.dispose();
     this.renderer.dispose();
 
     if (this.renderer.domElement.parentElement) {

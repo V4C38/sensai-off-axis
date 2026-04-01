@@ -20,13 +20,21 @@ declare global {
 
 interface FaceMeshViewProps {
   onHeadPoseUpdate?: (headPose: HeadPose | null) => void;
+  showPreview?: boolean;
 }
 
-const FaceMeshView: React.FC<FaceMeshViewProps> = ({ onHeadPoseUpdate }) => {
+const PREVIEW_DRAW_INTERVAL_MS = 1000 / 15;
+
+const FaceMeshView: React.FC<FaceMeshViewProps> = ({
+  onHeadPoseUpdate,
+  showPreview = true,
+}) => {
   const webcamRef = useRef<Webcam | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const faceMeshRef = useRef<any>(null);
   const cameraRef = useRef<any>(null);
+  const canvasContextRef = useRef<CanvasRenderingContext2D | null>(null);
+  const lastPreviewDrawTimeRef = useRef(0);
 
   const [isLoading, setIsLoading] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
@@ -75,6 +83,16 @@ const FaceMeshView: React.FC<FaceMeshViewProps> = ({ onHeadPoseUpdate }) => {
     };
   }, []);
 
+  useEffect(() => {
+    if (showPreview || !canvasRef.current) {
+      return;
+    }
+
+    const ctx = canvasContextRef.current ?? canvasRef.current.getContext('2d');
+    canvasContextRef.current = ctx;
+    ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+  }, [showPreview]);
+
   const handleWebcamLoad = () => {
     console.log("Webcam loaded");
     setCameraReady(true);
@@ -95,14 +113,10 @@ const FaceMeshView: React.FC<FaceMeshViewProps> = ({ onHeadPoseUpdate }) => {
     if (!canvasRef.current) return;
 
     const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvasContextRef.current ?? canvas.getContext('2d');
+    canvasContextRef.current = ctx;
 
     if (!ctx) return;
-
-    ctx.save();
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.scale(-1, 1);
-    ctx.translate(-canvas.width, 0);
 
     if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
       if (onHeadPoseUpdate) {
@@ -137,36 +151,52 @@ const FaceMeshView: React.FC<FaceMeshViewProps> = ({ onHeadPoseUpdate }) => {
         }
       }
 
-      for (const landmarks of results.multiFaceLandmarks) {
-        window.drawConnectors(ctx, landmarks, window.FACEMESH_TESSELATION,
-          { color: 'rgba(255, 255, 255, 0.2)', lineWidth: 0.8 });
+      const now = performance.now();
+      const shouldDrawPreview =
+        showPreview && now - lastPreviewDrawTimeRef.current >= PREVIEW_DRAW_INTERVAL_MS;
 
-        window.drawConnectors(ctx, landmarks, window.FACEMESH_RIGHT_EYE,
-          { color: 'rgba(255, 255, 255, 0.8)', lineWidth: 1.5 });
+      if (shouldDrawPreview) {
+        lastPreviewDrawTimeRef.current = now;
+        ctx.save();
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.scale(-1, 1);
+        ctx.translate(-canvas.width, 0);
 
-        window.drawConnectors(ctx, landmarks, window.FACEMESH_LEFT_EYE,
-          { color: 'rgba(255, 255, 255, 0.8)', lineWidth: 1.5 });
+        for (const landmarks of results.multiFaceLandmarks) {
+          window.drawConnectors(ctx, landmarks, window.FACEMESH_TESSELATION,
+            { color: 'rgba(255, 255, 255, 0.2)', lineWidth: 0.8 });
 
-        window.drawConnectors(ctx, landmarks, window.FACEMESH_RIGHT_EYEBROW,
-          { color: 'rgba(255, 255, 255, 0.8)', lineWidth: 1.5 });
+          window.drawConnectors(ctx, landmarks, window.FACEMESH_RIGHT_EYE,
+            { color: 'rgba(255, 255, 255, 0.8)', lineWidth: 1.5 });
 
-        window.drawConnectors(ctx, landmarks, window.FACEMESH_LEFT_EYEBROW,
-          { color: 'rgba(255, 255, 255, 0.8)', lineWidth: 1.5 });
+          window.drawConnectors(ctx, landmarks, window.FACEMESH_LEFT_EYE,
+            { color: 'rgba(255, 255, 255, 0.8)', lineWidth: 1.5 });
 
-        window.drawConnectors(ctx, landmarks, window.FACEMESH_FACE_OVAL,
-          { color: 'rgba(255, 255, 255, 0.8)', lineWidth: 1.5 });
+          window.drawConnectors(ctx, landmarks, window.FACEMESH_RIGHT_EYEBROW,
+            { color: 'rgba(255, 255, 255, 0.8)', lineWidth: 1.5 });
 
-        window.drawConnectors(ctx, landmarks, window.FACEMESH_LIPS,
-          { color: 'rgba(255, 255, 255, 0.8)', lineWidth: 1.5 });
+          window.drawConnectors(ctx, landmarks, window.FACEMESH_LEFT_EYEBROW,
+            { color: 'rgba(255, 255, 255, 0.8)', lineWidth: 1.5 });
 
-        window.drawLandmarks(ctx, landmarks,
-          { color: 'rgba(255, 255, 255, 0.6)', lineWidth: 0.8, radius: 1.2 });
+          window.drawConnectors(ctx, landmarks, window.FACEMESH_FACE_OVAL,
+            { color: 'rgba(255, 255, 255, 0.8)', lineWidth: 1.5 });
+
+          window.drawConnectors(ctx, landmarks, window.FACEMESH_LIPS,
+            { color: 'rgba(255, 255, 255, 0.8)', lineWidth: 1.5 });
+
+          window.drawLandmarks(ctx, landmarks,
+            { color: 'rgba(255, 255, 255, 0.6)', lineWidth: 0.8, radius: 1.2 });
+        }
+
+        ctx.restore();
       }
     } else if (onHeadPoseUpdate) {
       onHeadPoseUpdate(null);
-    }
 
-    ctx.restore();
+      if (showPreview) {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    }
   };
 
   // Initialize and start FaceMesh

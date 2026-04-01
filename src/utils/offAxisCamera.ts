@@ -15,6 +15,8 @@ export class OffAxisCamera {
   private screenHeightWorld: number;
   private nearPlane: number = 0.05;
   private farPlane: number = 1000;
+  private frustumScale: number = 0.95;
+  private cameraDistanceScale: number = 1.0;
 
   constructor(camera: THREE.PerspectiveCamera, calibration: CalibrationData) {
     this.camera = camera;
@@ -44,7 +46,7 @@ export class OffAxisCamera {
 
     const baseDistance = this.calibration.viewingDistanceCm * worldScale;
     const depthScale = 1.0 / headPose.z;
-    const headZWorld = baseDistance * depthScale;
+    const headZWorld = baseDistance * depthScale * this.cameraDistanceScale;
 
     return {
       x: headXWorld,
@@ -76,10 +78,10 @@ export class OffAxisCamera {
 
     const n_over_d = near / viewerToScreenDistance;
 
-    const left = (screenLeft - eyeX) * n_over_d;
-    const right = (screenRight - eyeX) * n_over_d;
-    const bottom = (screenBottom - eyeY) * n_over_d;
-    const top = (screenTop - eyeY) * n_over_d;
+    const left = (screenLeft - eyeX) * n_over_d * this.frustumScale;
+    const right = (screenRight - eyeX) * n_over_d * this.frustumScale;
+    const bottom = (screenBottom - eyeY) * n_over_d * this.frustumScale;
+    const top = (screenTop - eyeY) * n_over_d * this.frustumScale;
 
     this.camera.projectionMatrix.makePerspective(left, right, top, bottom, near, far);
     this.camera.projectionMatrixInverse.copy(this.camera.projectionMatrix).invert();
