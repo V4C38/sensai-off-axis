@@ -7,7 +7,7 @@ This is a fork of Ian Curtis's original off-axis sneaker project, which takes th
 
 ![Demo](assets/demo_1.gif)
 
-**Live demo:** [off-axis-sneaker.bolt.host](https://off-axis-sneaker.bolt.host)
+**Live demo:** [Demo Link](https://sensai-off-axis.johannestscharn.workers.dev/)
 
 ---
 
