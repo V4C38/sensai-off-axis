@@ -3,9 +3,7 @@ import { SparkRenderer, SplatMesh } from '@sparkjsdev/spark';
 import { HeadPose } from './headPose';
 import { OffAxisCamera } from './offAxisCamera';
 import { calibrationManager, CalibrationData } from './calibration';
-import { GaussianSplatAnimator } from './gaussianSplatAnimator';
 import { ALL_SPLAT_INDICES, assertValidSplatIndex, SplatIndex } from './sceneConfig';
-import { SPLAT_CROSSFADE_DURATION_SECONDS } from './presentationScript';
 
 export interface ThreeSceneOptions {
   container: HTMLElement;
@@ -15,24 +13,23 @@ export interface ThreeSceneOptions {
 
 interface CachedSplatEntry {
   mesh: SplatMesh;
-  animator: GaussianSplatAnimator;
   initialized: Promise<void>;
 }
 
 const MAX_RENDER_PIXEL_RATIO = 1.25;
 const LOD_SPLAT_COUNT = 1000000;
 const LOD_RENDER_SCALE = 1.0;
+/** How long both splats stay in the scene after the new one is ready (then previous is removed). */
+const SPLAT_PREVIOUS_UNLOAD_DELAY_MS = 200;
 
 export class ThreeSceneManager {
+  private container: HTMLElement;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private renderer: THREE.WebGLRenderer;
   private sparkRenderer: SparkRenderer;
   private offAxisCamera: OffAxisCamera;
   private activeSplatMesh: SplatMesh | null = null;
-  private outgoingSplatMesh: SplatMesh | null = null;
-  private activeSplatAnimator: GaussianSplatAnimator | null = null;
-  private outgoingSplatAnimator: GaussianSplatAnimator | null = null;
   private currentSplatIndex: SplatIndex = 1;
   private splatForwardOffset = 0.0;
   private modelPosition = new THREE.Vector3(0, -0.02, this.splatForwardOffset);
@@ -55,6 +52,7 @@ export class ThreeSceneManager {
     const width = options.width || options.container.clientWidth;
     const height = options.height || options.container.clientHeight;
 
+    this.container = options.container;
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0xffffff);
 
@@ -62,10 +60,7 @@ export class ThreeSceneManager {
     this.camera.position.set(0, 0, -25);
 
     const calibration = calibrationManager.getCalibration();
-    this.renderAspect = calibration.screenWidthCm / calibration.screenHeightCm;
-    if (!Number.isFinite(this.renderAspect) || this.renderAspect <= 0) {
-      throw new Error('Invalid calibration aspect ratio');
-    }
+    this.renderAspect = this.getRenderAspect(calibration);
 
     calibration.pixelWidth = width;
     calibration.pixelHeight = height;
@@ -131,12 +126,10 @@ export class ThreeSceneManager {
   }
 
   async showSplat(index: SplatIndex, crossfade: boolean = true): Promise<void> {
+    void crossfade;
     assertValidSplatIndex(index);
 
     if (this.activeSplatMesh && this.currentSplatIndex === index) {
-      if (!crossfade && this.activeSplatAnimator) {
-        this.activeSplatAnimator.setProgress(1);
-      }
       return;
     }
 
@@ -148,48 +141,19 @@ export class ThreeSceneManager {
       return;
     }
 
-    if (this.outgoingSplatMesh === entry.mesh) {
-      this.scene.remove(this.outgoingSplatMesh);
-      this.outgoingSplatAnimator?.stop();
-      this.outgoingSplatMesh = null;
-      this.outgoingSplatAnimator = null;
-    }
-
     this.applyCurrentTransform(entry.mesh);
-    entry.animator.setProgress(1);
-    this.needsRender = true;
-    await this.promoteSplat(entry.mesh, entry.animator, index, crossfade);
-  }
+    const previousMesh = this.activeSplatMesh;
 
-  private async promoteSplat(
-    nextMesh: SplatMesh,
-    nextAnimator: GaussianSplatAnimator,
-    index: SplatIndex,
-    crossfade: boolean
-  ): Promise<void> {
-    this.disposeOutgoingSplat();
-
-    if (crossfade && this.activeSplatMesh && this.activeSplatAnimator) {
-      this.outgoingSplatMesh = this.activeSplatMesh;
-      this.outgoingSplatAnimator = this.activeSplatAnimator;
-      this.activeSplatMesh = null;
-      this.activeSplatAnimator = null;
-      await this.outgoingSplatAnimator.animateOut(SPLAT_CROSSFADE_DURATION_SECONDS);
-      this.disposeOutgoingSplat();
-    } else if (this.activeSplatMesh) {
-      this.scene.remove(this.activeSplatMesh);
-      this.activeSplatMesh = null;
-      this.activeSplatAnimator = null;
-    }
-
-    this.activeSplatMesh = nextMesh;
-    this.activeSplatAnimator = nextAnimator;
+    this.scene.add(entry.mesh);
+    this.activeSplatMesh = entry.mesh;
     this.currentSplatIndex = index;
-
-    this.scene.add(nextMesh);
-    this.activeSplatAnimator.setProgress(1);
-
     this.needsRender = true;
+
+    if (previousMesh && previousMesh !== entry.mesh) {
+      await new Promise<void>((r) => setTimeout(r, SPLAT_PREVIOUS_UNLOAD_DELAY_MS));
+      this.scene.remove(previousMesh);
+      this.needsRender = true;
+    }
   }
 
   private getSplatUrl(index: SplatIndex): string {
@@ -209,15 +173,8 @@ export class ThreeSceneManager {
     });
     this.applyCurrentTransform(mesh);
 
-    const animator = new GaussianSplatAnimator(mesh, {
-      duration: SPLAT_CROSSFADE_DURATION_SECONDS,
-    });
-    animator.apply();
-    animator.setProgress(0);
-
     const entry: CachedSplatEntry = {
       mesh,
-      animator,
       initialized: mesh.initialized.then(() => undefined),
     };
     this.splatCache.set(index, entry);
@@ -239,6 +196,8 @@ export class ThreeSceneManager {
 
   updateCalibration(calibration: CalibrationData): void {
     this.offAxisCamera.updateCalibration(calibration);
+    this.renderAspect = this.getRenderAspect(calibration);
+    this.applyRendererLayout(this.container.clientWidth, this.container.clientHeight);
     this.needsRender = true;
   }
 
@@ -290,30 +249,6 @@ export class ThreeSceneManager {
     if (this.activeSplatMesh) {
       this.applyCurrentTransform(this.activeSplatMesh);
     }
-
-    if (this.outgoingSplatMesh) {
-      this.applyCurrentTransform(this.outgoingSplatMesh);
-    }
-  }
-
-  private updateSplatAnimations(): void {
-    this.activeSplatAnimator?.tick();
-    this.outgoingSplatAnimator?.tick();
-
-    if (this.outgoingSplatAnimator && !this.outgoingSplatAnimator.isAnimating && this.outgoingSplatAnimator.getProgress() <= 0) {
-      this.disposeOutgoingSplat();
-    }
-  }
-
-  private disposeOutgoingSplat(): void {
-    if (!this.outgoingSplatMesh) {
-      return;
-    }
-
-    this.scene.remove(this.outgoingSplatMesh);
-    this.outgoingSplatMesh = null;
-    this.outgoingSplatAnimator = null;
-    this.needsRender = true;
   }
 
   private createDebugHelpers(): void {
@@ -337,15 +272,10 @@ export class ThreeSceneManager {
     }
 
     this.animationFrameId = requestAnimationFrame(this.animate);
-    const hadActiveAnimations = Boolean(
-      this.activeSplatAnimator?.isAnimating || this.outgoingSplatAnimator?.isAnimating
-    );
-
-    if (!this.needsRender && !hadActiveAnimations) {
+    if (!this.needsRender) {
       return;
     }
 
-    this.updateSplatAnimations();
     this.offAxisCamera.updateFromHeadPose(this.currentHeadPose);
 
     if (this.debugMode && this.debugHelpers.length > 1) {
@@ -354,9 +284,7 @@ export class ThreeSceneManager {
     }
 
     this.renderer.render(this.scene, this.camera);
-    this.needsRender = Boolean(
-      this.activeSplatAnimator?.isAnimating || this.outgoingSplatAnimator?.isAnimating
-    );
+    this.needsRender = false;
   };
 
   start(): void {
@@ -377,6 +305,15 @@ export class ThreeSceneManager {
   resize(width: number, height: number): void {
     this.applyRendererLayout(width, height);
     this.needsRender = true;
+  }
+
+  private getRenderAspect(calibration: CalibrationData): number {
+    const aspect = calibration.screenWidthCm / calibration.screenHeightCm;
+    if (!Number.isFinite(aspect) || aspect <= 0) {
+      throw new Error('Invalid calibration aspect ratio');
+    }
+
+    return aspect;
   }
 
   private applyRendererLayout(containerWidth: number, containerHeight: number): void {
@@ -405,12 +342,8 @@ export class ThreeSceneManager {
     if (this.activeSplatMesh) {
       this.scene.remove(this.activeSplatMesh);
       this.activeSplatMesh = null;
-      this.activeSplatAnimator = null;
     }
-
-    this.disposeOutgoingSplat();
     this.splatCache.forEach((entry) => {
-      entry.animator.dispose();
       entry.mesh.dispose();
     });
     this.splatCache.clear();

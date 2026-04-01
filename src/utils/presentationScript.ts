@@ -19,36 +19,36 @@ export const PRESENTATION_SEQUENCE: readonly PresentationScene[] = [
   {
     splatIndex: 1,
     captions: [
-      { text: '200+ Hackers...', durationSeconds: 1.0 },
-      { text: '36+ Hours...', durationSeconds: 1.0 },
-      { text: '50+ Worlds...', durationSeconds: 1.0 },
-      { text: 'at the #WorldsInAction Hack!', durationSeconds: 1.0 },
+      { text: 'Worlds in Action Hack Project Showcase!', durationSeconds: 2.5 },
+      { text: '200+ Hackers...', durationSeconds: 1.5 },
+      { text: '36+ Hours...', durationSeconds:   1.5 },
+      { text: '40+ Worlds...', durationSeconds: 1.5 },
     ],
   },
   {
     splatIndex: 2,
     captions: [
-      { text: 'Candy Land Diners', durationSeconds: 2.25 },
+      { text: 'TV Blaster', durationSeconds: 3.0 },
     ],
   },
   {
     splatIndex: 3,
     captions: [
-      { text: '-! GET TEAM NAME !-', durationSeconds: 2.25 },
+      { text: 'Candy Land Diners', durationSeconds: 3.0 },
     ],
   },
   {
     splatIndex: 4,
     captions: [
-      { text: 'Barbie Bathroom', durationSeconds: 2.25 },
+      { text: 'Barbie Bathroom', durationSeconds: 3.0 },
     ],
   },
   {
     splatIndex: 5,
     captions: [
-      { text: '-! GET TEAM NAME !-', durationSeconds: 2.0 },
-      { text: 'What would be yours?', durationSeconds: 1.5 },
-      { text: 'Bring yours to the next Hack!', durationSeconds: 1.5 },
+      { text: 'Floral Bedrooms', durationSeconds: 2.0 },
+      { text: 'Which world would you build?', durationSeconds: 1.5 },
+      { text: 'Join the next Worlds in Action Hack!', durationSeconds: 1.5 },
     ],
   },
 ];

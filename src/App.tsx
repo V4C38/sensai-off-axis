@@ -353,7 +353,7 @@ function App() {
       <main className="flex-1 relative">
         {!isCheckingCdn && !isCdnAvailable && (
           <div className="absolute top-4 left-4 right-4 z-30 max-w-2xl mx-auto p-3 bg-yellow-50 text-yellow-800 rounded-md">
-            <p className="text-sm">
+            <p className="text-sm text-center">
               We're having trouble connecting to the required resources. Please check your internet connection.
             </p>
           </div>
@@ -365,21 +365,22 @@ function App() {
 
         {isFirstSceneLoading && isSequencePlaying && (
           <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
-            <div className="rounded bg-black bg-opacity-55 px-4 py-2 text-sm font-medium text-white shadow-lg backdrop-blur-sm">
+            <div className="rounded bg-black bg-opacity-55 px-4 py-2 text-center text-sm font-medium text-white shadow-lg backdrop-blur-sm">
               Loading first scene...
             </div>
           </div>
         )}
 
         {overlayCaption && (
-          <div className="absolute bottom-24 left-40 z-20 pointer-events-none">
+          <div className="absolute inset-x-0 bottom-40 z-20 flex justify-center pointer-events-none">
             <div
-              className={`max-w-none whitespace-nowrap text-white font-black leading-none tracking-tight transition-opacity duration-200 ${
+              className={`max-w-none whitespace-nowrap text-center text-white font-black leading-none tracking-tight transition-opacity duration-200 ${
                 isOverlayCaptionVisible ? 'opacity-100' : 'opacity-0'
               }`}
               style={{
-                fontSize: 'clamp(2rem, 4vw, 3.75rem)',
-                textShadow: '0 4px 0 rgba(0, 0, 0, 0.9), 0 0 12px rgba(0, 0, 0, 0.65)',
+                fontSize: 'clamp(2.35rem, 4.75vw, 4.45rem)',
+                textShadow:
+                  '0 1px 0 rgba(0, 0, 0, 1), 0 3px 0 rgba(0, 0, 0, 0.92), 0 6px 0 rgba(0, 0, 0, 0.78), 0 10px 18px rgba(0, 0, 0, 0.65), 0 0 32px rgba(0, 0, 0, 0.82), 0 18px 40px rgba(0, 0, 0, 0.55)',
               }}
             >
               {overlayCaption}
