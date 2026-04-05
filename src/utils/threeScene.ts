@@ -110,6 +110,41 @@ export class ThreeSceneManager {
     this.needsRender = true;
   }
 
+  /**
+   * Replaces the current splat with one decoded from local file bytes.
+   * Loads the new mesh before disposing the previous one so a failed decode keeps the prior splat.
+   */
+  async loadSplatFromBytes(fileBytes: Uint8Array): Promise<void> {
+    const mesh = new SplatMesh({
+      fileBytes,
+      lod: true,
+      lodScale: 1.0,
+    });
+    this.applyCurrentTransform(mesh);
+
+    try {
+      await mesh.initialized;
+    } catch (err) {
+      mesh.dispose();
+      throw err;
+    }
+
+    if (this.disposed) {
+      mesh.dispose();
+      return;
+    }
+
+    if (this.activeSplatMesh) {
+      this.scene.remove(this.activeSplatMesh);
+      this.activeSplatMesh.dispose();
+      this.activeSplatMesh = null;
+    }
+
+    this.scene.add(mesh);
+    this.activeSplatMesh = mesh;
+    this.needsRender = true;
+  }
+
   updateHeadPose(headPose: HeadPose): void {
     this.currentHeadPose = headPose;
     this.needsRender = true;

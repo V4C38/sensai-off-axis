@@ -18,12 +18,14 @@ This is a fork of Ian Curtis's original off-axis sneaker project, which takes th
 - **Three.js** for the WebGL view, with **Spark** for **splat** rendering (`SplatMesh` / `SparkRenderer`)
 - A **calibration wizard** for physical screen size and viewing distance
 - Debug helpers, face preview, and a control panel for splat transform
+- Optional **local splat file** picker (Spark-supported formats: `.ply`, `.spz`, `.splat`, `.ksplat`) — loads in the browser only; no server upload
 
 ## Features
 
 - Real-time head tracking (MediaPipe Face Mesh / Tasks)
 - Off-axis style camera response to head movement
-- **3D Gaussian splat** scene content (demo asset: `public/media/demoSplat.ply`)
+- **3D Gaussian splat** scene content (default: `public/media/demoSplat.ply`)
+- **Load your own splat** from disk via the upload button in the bottom-left toolbar (between fullscreen and calibration). The file is read client-side and replaces the default for that session only; each visitor on a hosted build uses their own machine’s file.
 - Calibration and sensitivity tuning for a convincing “window into a world” effect
 - Optional debug visualization and MediaPipe CDN connectivity checks
 

@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Maximize, Minimize, Settings, Bug, X, Camera } from 'lucide-react';
 import FaceMeshView from './components/FaceMeshView';
 import ThreeView, { ThreeViewHandle } from './components/ThreeView';
 import CalibrationWizard from './components/CalibrationWizard';
 import ShoeControlPanel from './components/ShoeControlPanel';
+import SplatUploadButton from './components/SplatUploadButton';
 import { HeadPose, HeadPoseTracker } from './utils/headPose';
 import { calibrationManager, CalibrationData } from './utils/calibration';
 
@@ -17,6 +18,7 @@ function App() {
   const [shoeScale, setShoeScale] = useState(0.071);
   const [shoeRotation, setShoeRotation] = useState({ x: 0, y: -0.628, z: 0 });
   const [isCameraViewCollapsed, setIsCameraViewCollapsed] = useState(false);
+  const [customSplatActive, setCustomSplatActive] = useState(false);
   const headPoseTrackerRef = useRef(new HeadPoseTracker(0.3));
   const syntheticFaceLandmarksRef = useRef(
     Array.from({ length: 468 }, () => ({ x: 0, y: 0, z: 0 }))
@@ -150,6 +152,15 @@ function App() {
     }
   };
 
+  const handleSplatSelected = useCallback(async (fileBytes: Uint8Array, _fileName: string) => {
+    const view = threeViewRef.current;
+    if (!view) {
+      throw new Error('3D view is not ready.');
+    }
+    await view.loadSplatFromBytes(fileBytes);
+    setCustomSplatActive(true);
+  }, []);
+
   useEffect(() => {
     const timer = setTimeout(() => {
       if (threeViewRef.current) {
@@ -234,6 +245,11 @@ function App() {
           >
             {isFullscreen ? <Minimize size={14} /> : <Maximize size={14} />}
           </button>
+
+          <SplatUploadButton
+            onSplatSelected={handleSplatSelected}
+            customSplatActive={customSplatActive}
+          />
 
           <button
             onClick={() => setShowCalibration(true)}

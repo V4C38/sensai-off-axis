@@ -13,6 +13,7 @@ export interface ThreeViewHandle {
   getModelPosition: () => { x: number; y: number; z: number };
   getModelScale: () => number;
   getModelRotation: () => { x: number; y: number; z: number };
+  loadSplatFromBytes: (fileBytes: Uint8Array) => Promise<void>;
 }
 
 const ThreeView = forwardRef<ThreeViewHandle>((_, ref) => {
@@ -100,6 +101,13 @@ const ThreeView = forwardRef<ThreeViewHandle>((_, ref) => {
         return sceneManagerRef.current.getModelRotation();
       }
       return { x: 0, y: -0.628, z: 0 };
+    },
+    loadSplatFromBytes: async (fileBytes: Uint8Array) => {
+      if (sceneManagerRef.current) {
+        await sceneManagerRef.current.loadSplatFromBytes(fileBytes);
+      } else {
+        throw new Error('ThreeSceneManager is not ready.');
+      }
     },
   }));
 
